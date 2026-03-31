@@ -18,7 +18,7 @@ Tampermonkey userscript for Canvas LMS that scans a course Modules page, finds l
 
 ## Install with Tampermonkey
 
-1. Install Tampermonkey:
+1. Install [Tampermonkey](https://www.tampermonkey.net/):
    - Chrome/Edge: install from the browser extension store.
    - Firefox: install from Firefox Add-ons.
 2. Open this raw script URL in your browser:
