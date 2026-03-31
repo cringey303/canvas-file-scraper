@@ -1,4 +1,4 @@
-# Canvas Universal Deep Scraper
+# Canvas File Scraper
 
 Tampermonkey userscript for Canvas LMS that scans a course Modules page, finds linked downloadable files, and exports selected files into a single ZIP.
 
@@ -8,7 +8,7 @@ Tampermonkey userscript for Canvas LMS that scans a course Modules page, finds l
 - Scans module item pages for Canvas file download links.
 - Lets you choose which discovered files to include.
 - Includes `Select All` and `Select None` quick actions.
-- Downloads all selected files as `Canvas_Modules_Export.zip`.
+- Downloads all selected files as `Canvas_File_Scraper_Export.zip`.
 
 ## Requirements
 
@@ -45,7 +45,7 @@ Tampermonkey userscript for Canvas LMS that scans a course Modules page, finds l
 5. Optional: use `Select All` or `Select None` to quickly toggle file selection.
 6. Check or uncheck individual files as needed.
 7. Click `Download ZIP`.
-8. Your browser downloads `Canvas_Modules_Export.zip`.
+8. Your browser downloads `Canvas_File_Scraper_Export.zip`.
 
 ## Notes and limitations
 

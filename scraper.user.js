@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Canvas Universal Deep Scraper
+// @name         Canvas File Scraper
 // @namespace    http://tampermonkey.net/
 // @version      1.2
 // @description  Deep scrape and ZIP files from any Canvas Modules page
@@ -67,7 +67,7 @@
     launcherTab.id = 'canvas-scraper-tab';
     launcherTab.type = 'button';
     launcherTab.textContent = '-';
-    launcherTab.title = 'Open Canvas Deep Scraper';
+    launcherTab.title = 'Open Canvas File Scraper';
     launcherTab.style = `
         position: fixed; top: 140px; right: 0; width: 34px; height: 88px;
         background: #2d2d2d; color: #fff; z-index: 99999; border: 1px solid #444;
@@ -87,7 +87,7 @@
 
     container.innerHTML = `
         <div id="scraper-header" style="padding: 15px; background: #2d2d2d; cursor: move; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #444;">
-            <span style="font-weight: bold; font-size: 14px;">Canvas Deep Scraper</span>
+            <span style="font-weight: bold; font-size: 14px;">Canvas File Scraper</span>
             <div style="display: flex; gap: 6px; align-items: center;">
                 <button id="minimize-scraper" title="Minimize" style="background: none; border: none; color: #d1d5db; font-size: 22px; cursor: pointer; line-height: 1;">-</button>
                 <button id="close-scraper" title="Close" style="background: none; border: none; color: #ff4d4d; font-size: 20px; cursor: pointer; line-height: 1;">&times;</button>
@@ -258,7 +258,7 @@
         const a = document.createElement('a');
         const objectUrl = URL.createObjectURL(content);
         a.href = objectUrl;
-        a.download = "Canvas_Modules_Export.zip";
+        a.download = "Canvas_File_Scraper_Export.zip";
         a.click();
         URL.revokeObjectURL(objectUrl);
         dlBtn.disabled = false;
