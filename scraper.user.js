@@ -83,6 +83,13 @@
     let preparedSelectionSignature = '';
     let activePrepareToken = 0;
     let prepareTimer = null;
+    let isDownloadInProgress = false;
+    let cancelDownloadRequested = false;
+    let autoScanTimer = null;
+    let autoScanAttempts = 0;
+    let isScanning = false;
+    const MAX_AUTO_SCAN_ATTEMPTS = 8;
+    const AUTO_SCAN_RETRY_MS = 1500;
 
     const getSelectedEntries = () => {
         return Array.from(container.querySelectorAll('.sc-cb:checked')).map((cb) => {
@@ -116,18 +123,26 @@
         }
     };
 
-    const buildZipBlob = async (entries) => {
+    const buildZipBlob = async (entries, shouldCancel) => {
         const zip = new JSZip();
         const usedNames = new Set();
 
         for (const entry of entries) {
+            if (shouldCancel && shouldCancel()) {
+                throw new Error('ZIP build canceled by user.');
+            }
+
             try {
                 const blob = await getBlobForUrl(entry.url);
+                if (shouldCancel && shouldCancel()) {
+                    throw new Error('ZIP build canceled by user.');
+                }
                 const baseName = sanitizeName(entry.name);
                 const ext = extensionFromUrl(entry.url);
                 const fileName = ensureUniqueName(`${baseName}${ext}`, usedNames);
                 zip.file(fileName, blob);
             } catch (e) {
+                if (shouldCancel && shouldCancel()) throw e;
                 console.error('File skip:', e);
             }
         }
@@ -287,6 +302,7 @@
         document.removeEventListener('mousemove', onMouseMove);
         document.removeEventListener('mouseup', onMouseUp);
         if (prepareTimer) clearTimeout(prepareTimer);
+        if (autoScanTimer) clearTimeout(autoScanTimer);
         launcherTab.remove();
         container.remove();
     });
@@ -299,10 +315,15 @@
     });
 
     // --- Scraper Logic ---
-    startBtn.onclick = async () => {
+    const runScan = async (isAutoScan) => {
+        if (isScanning) return;
+        isScanning = true;
+
         startBtn.style.display = 'none';
+        startBtn.disabled = true;
         list.innerHTML = '';
         selectActions.style.display = 'none';
+        dlBtn.style.display = 'none';
         preparedZipBlob = null;
         preparedSelectionSignature = '';
         blobPromiseCache.clear();
@@ -310,11 +331,24 @@
 
         const moduleItems = getModuleItems();
         if (moduleItems.length === 0) {
+            isScanning = false;
+            if (isAutoScan && autoScanAttempts < MAX_AUTO_SCAN_ATTEMPTS) {
+                autoScanAttempts += 1;
+                status.innerText = 'Waiting for module items to load...';
+                autoScanTimer = setTimeout(() => {
+                    runScan(true);
+                }, AUTO_SCAN_RETRY_MS);
+                return;
+            }
+
             status.innerText = 'No module item links found yet. Scroll/load modules, then try again.';
             startBtn.style.display = 'block';
+            startBtn.disabled = false;
             startBtn.innerText = 'Scan Again';
             return;
         }
+
+        autoScanAttempts = 0;
 
         const found = [];
         for (let i = 0; i < moduleItems.length; i++) {
@@ -349,6 +383,8 @@
                 }
             } catch (e) { console.error("Item skip:", e); }
         }
+
+        isScanning = false;
         status.innerText = `Scan complete. Found ${found.length} files.`;
         dlBtn.style.display = found.length > 0 ? 'block' : 'none';
         selectActions.style.display = found.length > 0 ? 'flex' : 'none';
@@ -358,35 +394,70 @@
         }
         if (found.length === 0) {
             startBtn.style.display = 'block';
+            startBtn.disabled = false;
             startBtn.innerText = 'Scan Again';
         }
     };
 
+    startBtn.onclick = async () => {
+        runScan(false);
+    };
+
+    // Trigger an automatic scan on page load so results are ready faster.
+    autoScanTimer = setTimeout(() => {
+        runScan(true);
+    }, 600);
+
     // --- ZIP Logic ---
     dlBtn.onclick = async () => {
+        if (isDownloadInProgress) {
+            cancelDownloadRequested = true;
+            dlBtn.innerText = 'Cancelling...';
+            return;
+        }
+
         const selectedEntries = getSelectedEntries();
         if (selectedEntries.length === 0) return alert("Select files.");
 
-        dlBtn.disabled = true;
-        dlBtn.innerText = "Preparing...";
+        isDownloadInProgress = true;
+        cancelDownloadRequested = false;
+        dlBtn.disabled = false;
+        dlBtn.innerText = "Cancel";
 
         const signature = getSelectionSignature(selectedEntries);
         let content = preparedZipBlob;
 
-        if (!content || preparedSelectionSignature !== signature) {
-            content = await buildZipBlob(selectedEntries);
-            preparedZipBlob = content;
-            preparedSelectionSignature = signature;
-        }
+        try {
+            if (!content || preparedSelectionSignature !== signature) {
+                content = await buildZipBlob(selectedEntries, () => cancelDownloadRequested);
+                preparedZipBlob = content;
+                preparedSelectionSignature = signature;
+            }
 
-        const a = document.createElement('a');
-        const objectUrl = URL.createObjectURL(content);
-        a.href = objectUrl;
-        const zipName = `${getCourseTitle()}.zip`;
-        a.download = zipName;
-        a.click();
-        URL.revokeObjectURL(objectUrl);
-        dlBtn.disabled = false;
-        dlBtn.innerText = "Download ZIP";
+            if (cancelDownloadRequested) {
+                status.innerText = 'Download canceled.';
+                return;
+            }
+
+            const a = document.createElement('a');
+            const objectUrl = URL.createObjectURL(content);
+            a.href = objectUrl;
+            const zipName = `${getCourseTitle()}.zip`;
+            a.download = zipName;
+            a.click();
+            URL.revokeObjectURL(objectUrl);
+        } catch (e) {
+            if (cancelDownloadRequested) {
+                status.innerText = 'Download canceled.';
+            } else {
+                console.error('Download failed:', e);
+                status.innerText = 'Download failed. Try again.';
+            }
+        } finally {
+            isDownloadInProgress = false;
+            cancelDownloadRequested = false;
+            dlBtn.disabled = false;
+            dlBtn.innerText = "Download ZIP";
+        }
     };
 })();
