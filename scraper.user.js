@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         Canvas Universal Deep Scraper
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  Deep scrape and ZIP files from any Canvas Modules page
 // @author       Lucas Root
 // @match        https://*.instructure.com/courses/*/modules*
 // @match        *://*/courses/*/modules*
+// @downloadURL  https://raw.githubusercontent.com/cringey303/canvas-file-scraper/main/scraper.user.js
+// @updateURL    https://raw.githubusercontent.com/cringey303/canvas-file-scraper/main/scraper.user.js
 // @grant        none
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
 // ==/UserScript==
