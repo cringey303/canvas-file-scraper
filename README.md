@@ -22,7 +22,7 @@ Tampermonkey userscript for Canvas LMS that scans a course Modules page, finds l
    - Chrome/Edge: install from the browser extension store.
    - Firefox: install from Firefox Add-ons.
 2. Open this raw script URL in your browser:
-  - `https://raw.githubusercontent.com/cringey303/canvas-file-scraper/main/scraper.user.js`
+  - [https://raw.githubusercontent.com/cringey303/canvas-file-scraper/main/scraper.user.js](https://raw.githubusercontent.com/cringey303/canvas-file-scraper/main/scraper.user.js)
 3. Tampermonkey should open an install prompt.
 4. Click `Install` (or `Reinstall` when updating).
 5. Confirm the script is enabled in the Tampermonkey dashboard.
