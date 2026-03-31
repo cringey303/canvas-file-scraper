@@ -12,6 +12,48 @@
 (function() {
     'use strict';
 
+    if (document.getElementById('canvas-scraper-root')) return;
+
+    const sanitizeName = (name) => {
+        return (name || 'file')
+            .replace(/[\\/:*?"<>|]/g, '_')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 180) || 'file';
+    };
+
+    const extensionFromUrl = (url) => {
+        try {
+            const path = new URL(url, window.location.href).pathname;
+            const last = path.split('/').pop() || '';
+            const dot = last.lastIndexOf('.');
+            if (dot > 0 && dot < last.length - 1) return last.slice(dot);
+        } catch (_e) {
+            // Ignore URL parsing failures and return an empty extension.
+        }
+        return '';
+    };
+
+    const ensureUniqueName = (name, usedNames) => {
+        if (!usedNames.has(name)) {
+            usedNames.add(name);
+            return name;
+        }
+
+        const dot = name.lastIndexOf('.');
+        const hasExt = dot > 0;
+        const base = hasExt ? name.slice(0, dot) : name;
+        const ext = hasExt ? name.slice(dot) : '';
+        let index = 2;
+        let candidate = `${base} (${index})${ext}`;
+        while (usedNames.has(candidate)) {
+            index += 1;
+            candidate = `${base} (${index})${ext}`;
+        }
+        usedNames.add(candidate);
+        return candidate;
+    };
+
     // Find all module items that link to a page (which might contain a file)
     const moduleItems = Array.from(document.querySelectorAll('a.ig-title'))
         .filter(a => a.href.includes('/modules/items/'));
@@ -36,6 +78,10 @@
         </div>
         <div style="flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column;">
             <p id="scrape-status" style="font-size: 11px; color: #aaa; margin-bottom: 10px;">Ready to scan...</p>
+            <div id="scrape-select-actions" style="display: none; gap: 8px; margin-bottom: 10px;">
+                <button id="scrape-select-all" style="flex: 1; padding: 8px; background: #3b82f6; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">Select All</button>
+                <button id="scrape-select-none" style="flex: 1; padding: 8px; background: #6b7280; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">Select None</button>
+            </div>
             <div id="scrape-file-list" style="flex: 1; background: #111; border-radius: 4px; padding: 5px; overflow-y: auto; margin-bottom: 10px; border: 1px solid #333;"></div>
             <button id="scrape-dl-btn" style="width: 100%; padding: 12px; background: #00558c; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; display: none;">Download ZIP</button>
             <button id="scrape-start-btn" style="width: 100%; padding: 12px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Start Deep Scan</button>
@@ -49,24 +95,48 @@
     const list = container.querySelector('#scrape-file-list');
     const dlBtn = container.querySelector('#scrape-dl-btn');
     const startBtn = container.querySelector('#scrape-start-btn');
+    const selectActions = container.querySelector('#scrape-select-actions');
+    const selectAllBtn = container.querySelector('#scrape-select-all');
+    const selectNoneBtn = container.querySelector('#scrape-select-none');
+
+    const setAllCheckboxes = (checked) => {
+        const checkboxes = container.querySelectorAll('.sc-cb');
+        checkboxes.forEach((cb) => {
+            cb.checked = checked;
+        });
+    };
+
+    selectAllBtn.addEventListener('click', () => setAllCheckboxes(true));
+    selectNoneBtn.addEventListener('click', () => setAllCheckboxes(false));
 
     // --- Draggable Logic ---
     let isDragging = false;
     let offset = [0,0];
     const header = container.querySelector('#scraper-header');
 
-    header.onmousedown = (e) => {
+    header.addEventListener('mousedown', (e) => {
         isDragging = true;
         offset = [container.offsetLeft - e.clientX, container.offsetTop - e.clientY];
-    };
-    document.onmousemove = (e) => {
+    });
+
+    const onMouseMove = (e) => {
         if (!isDragging) return;
         container.style.left = (e.clientX + offset[0]) + 'px';
         container.style.top = (e.clientY + offset[1]) + 'px';
         container.style.right = 'auto'; // Disable 'right' to allow moving
     };
-    document.onmouseup = () => isDragging = false;
-    container.querySelector('#close-scraper').onclick = () => container.remove();
+    const onMouseUp = () => {
+        isDragging = false;
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+
+    container.querySelector('#close-scraper').addEventListener('click', () => {
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+        container.remove();
+    });
 
     // --- Scraper Logic ---
     startBtn.onclick = async () => {
@@ -76,21 +146,41 @@
             status.innerText = `Scanning item ${i+1}/${moduleItems.length}...`;
             try {
                 const res = await fetch(moduleItems[i].href);
+                if (!res.ok) continue;
                 const text = await res.text();
                 const doc = new DOMParser().parseFromString(text, 'text/html');
                 const dl = doc.querySelector('a[href*="/files/"][href*="/download"]');
                 if (dl) {
-                    const name = moduleItems[i].innerText.trim();
-                    found.push({ name, url: dl.href });
+                    const name = sanitizeName(moduleItems[i].innerText.trim());
+                    const url = new URL(dl.getAttribute('href'), moduleItems[i].href).href;
+                    found.push({ name, url });
                     const div = document.createElement('div');
                     div.style = "font-size: 12px; padding: 5px; border-bottom: 1px solid #222; display: flex; align-items: center;";
-                    div.innerHTML = `<input type="checkbox" class="sc-cb" data-name="${name}" value="${dl.href}" checked> <span style="margin-left:8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${name}</span>`;
+
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.className = 'sc-cb';
+                    checkbox.dataset.name = name;
+                    checkbox.value = url;
+                    checkbox.checked = true;
+
+                    const label = document.createElement('span');
+                    label.style = 'margin-left:8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;';
+                    label.textContent = name;
+
+                    div.appendChild(checkbox);
+                    div.appendChild(label);
                     list.appendChild(div);
                 }
             } catch (e) { console.error("Item skip:", e); }
         }
         status.innerText = `Scan complete. Found ${found.length} files.`;
-        dlBtn.style.display = 'block';
+        dlBtn.style.display = found.length > 0 ? 'block' : 'none';
+        selectActions.style.display = found.length > 0 ? 'flex' : 'none';
+        if (found.length === 0) {
+            startBtn.style.display = 'block';
+            startBtn.innerText = 'Scan Again';
+        }
     };
 
     // --- ZIP Logic ---
@@ -101,22 +191,28 @@
         
         dlBtn.disabled = true;
         dlBtn.innerText = "Processing...";
+
+        const usedNames = new Set();
         
         for (const cb of selected) {
             try {
                 const res = await fetch(cb.value);
+                if (!res.ok) continue;
                 const blob = await res.blob();
-                const name = cb.getAttribute('data-name');
-                const ext = blob.type.includes('pdf') ? '.pdf' : (blob.type.includes('sql') ? '.sql' : '');
-                zip.file(name + ext, blob);
+                const baseName = sanitizeName(cb.getAttribute('data-name'));
+                const ext = extensionFromUrl(cb.value);
+                const fileName = ensureUniqueName(`${baseName}${ext}`, usedNames);
+                zip.file(fileName, blob);
             } catch (e) { console.error("File skip:", e); }
         }
 
         const content = await zip.generateAsync({type:"blob"});
         const a = document.createElement('a');
-        a.href = URL.createObjectURL(content);
+        const objectUrl = URL.createObjectURL(content);
+        a.href = objectUrl;
         a.download = "Canvas_Modules_Export.zip";
         a.click();
+        URL.revokeObjectURL(objectUrl);
         dlBtn.disabled = false;
         dlBtn.innerText = "Download ZIP";
     };
