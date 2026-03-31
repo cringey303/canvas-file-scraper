@@ -78,6 +78,99 @@
         return sanitizeName(rawTitle || 'Canvas_Course');
     };
 
+    const blobPromiseCache = new Map();
+    let preparedZipBlob = null;
+    let preparedSelectionSignature = '';
+    let activePrepareToken = 0;
+    let prepareTimer = null;
+
+    const getSelectedEntries = () => {
+        return Array.from(container.querySelectorAll('.sc-cb:checked')).map((cb) => {
+            return {
+                name: cb.getAttribute('data-name') || 'file',
+                url: cb.value
+            };
+        });
+    };
+
+    const getSelectionSignature = (entries) => {
+        return entries.map((entry) => `${entry.name}|${entry.url}`).join('\n');
+    };
+
+    const getBlobForUrl = async (url) => {
+        if (blobPromiseCache.has(url)) return blobPromiseCache.get(url);
+
+        const promise = (async () => {
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(`Failed to fetch file: ${res.status}`);
+            return res.blob();
+        })();
+
+        blobPromiseCache.set(url, promise);
+
+        try {
+            return await promise;
+        } catch (e) {
+            blobPromiseCache.delete(url);
+            throw e;
+        }
+    };
+
+    const buildZipBlob = async (entries) => {
+        const zip = new JSZip();
+        const usedNames = new Set();
+
+        for (const entry of entries) {
+            try {
+                const blob = await getBlobForUrl(entry.url);
+                const baseName = sanitizeName(entry.name);
+                const ext = extensionFromUrl(entry.url);
+                const fileName = ensureUniqueName(`${baseName}${ext}`, usedNames);
+                zip.file(fileName, blob);
+            } catch (e) {
+                console.error('File skip:', e);
+            }
+        }
+
+        return zip.generateAsync({type:'blob'});
+    };
+
+    const prepareZipInBackground = async () => {
+        const entries = getSelectedEntries();
+        const signature = getSelectionSignature(entries);
+
+        if (entries.length === 0) {
+            preparedZipBlob = null;
+            preparedSelectionSignature = '';
+            return;
+        }
+
+        if (preparedZipBlob && preparedSelectionSignature === signature) return;
+
+        const token = ++activePrepareToken;
+        try {
+            const blob = await buildZipBlob(entries);
+            if (token !== activePrepareToken) return;
+            preparedZipBlob = blob;
+            preparedSelectionSignature = signature;
+            status.innerText = `Ready. ${entries.length} file${entries.length === 1 ? '' : 's'} prepared.`;
+        } catch (e) {
+            if (token !== activePrepareToken) return;
+            preparedZipBlob = null;
+            preparedSelectionSignature = '';
+            console.error('Background ZIP prepare failed:', e);
+        }
+    };
+
+    const queueZipPreparation = () => {
+        if (prepareTimer) clearTimeout(prepareTimer);
+        preparedZipBlob = null;
+        preparedSelectionSignature = '';
+        prepareTimer = setTimeout(() => {
+            prepareZipInBackground();
+        }, 250);
+    };
+
     const getModuleItems = () => {
         return Array.from(document.querySelectorAll('a.ig-title'))
             .filter(a => a.href.includes('/modules/items/'));
@@ -155,6 +248,7 @@
         checkboxes.forEach((cb) => {
             cb.checked = checked;
         });
+        queueZipPreparation();
     };
 
     launcherTab.addEventListener('click', openPanel);
@@ -192,8 +286,16 @@
         e.stopPropagation();
         document.removeEventListener('mousemove', onMouseMove);
         document.removeEventListener('mouseup', onMouseUp);
+        if (prepareTimer) clearTimeout(prepareTimer);
         launcherTab.remove();
         container.remove();
+    });
+
+    list.addEventListener('change', (e) => {
+        const target = e.target;
+        if (target && target.classList && target.classList.contains('sc-cb')) {
+            queueZipPreparation();
+        }
     });
 
     // --- Scraper Logic ---
@@ -201,6 +303,10 @@
         startBtn.style.display = 'none';
         list.innerHTML = '';
         selectActions.style.display = 'none';
+        preparedZipBlob = null;
+        preparedSelectionSignature = '';
+        blobPromiseCache.clear();
+        if (prepareTimer) clearTimeout(prepareTimer);
 
         const moduleItems = getModuleItems();
         if (moduleItems.length === 0) {
@@ -246,6 +352,10 @@
         status.innerText = `Scan complete. Found ${found.length} files.`;
         dlBtn.style.display = found.length > 0 ? 'block' : 'none';
         selectActions.style.display = found.length > 0 ? 'flex' : 'none';
+        if (found.length > 0) {
+            status.innerText = `Scan complete. Found ${found.length} files. Preparing ZIP...`;
+            queueZipPreparation();
+        }
         if (found.length === 0) {
             startBtn.style.display = 'block';
             startBtn.innerText = 'Scan Again';
@@ -254,28 +364,21 @@
 
     // --- ZIP Logic ---
     dlBtn.onclick = async () => {
-        const zip = new JSZip();
-        const selected = Array.from(container.querySelectorAll('.sc-cb:checked'));
-        if (selected.length === 0) return alert("Select files.");
-        
-        dlBtn.disabled = true;
-        dlBtn.innerText = "Processing...";
+        const selectedEntries = getSelectedEntries();
+        if (selectedEntries.length === 0) return alert("Select files.");
 
-        const usedNames = new Set();
-        
-        for (const cb of selected) {
-            try {
-                const res = await fetch(cb.value);
-                if (!res.ok) continue;
-                const blob = await res.blob();
-                const baseName = sanitizeName(cb.getAttribute('data-name'));
-                const ext = extensionFromUrl(cb.value);
-                const fileName = ensureUniqueName(`${baseName}${ext}`, usedNames);
-                zip.file(fileName, blob);
-            } catch (e) { console.error("File skip:", e); }
+        dlBtn.disabled = true;
+        dlBtn.innerText = "Preparing...";
+
+        const signature = getSelectionSignature(selectedEntries);
+        let content = preparedZipBlob;
+
+        if (!content || preparedSelectionSignature !== signature) {
+            content = await buildZipBlob(selectedEntries);
+            preparedZipBlob = content;
+            preparedSelectionSignature = signature;
         }
 
-        const content = await zip.generateAsync({type:"blob"});
         const a = document.createElement('a');
         const objectUrl = URL.createObjectURL(content);
         a.href = objectUrl;
