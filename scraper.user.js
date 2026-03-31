@@ -57,6 +57,27 @@
         return candidate;
     };
 
+    const getCourseTitle = () => {
+        const selectors = [
+            'h1',
+            '.ellipsible',
+            '[data-testid="title"]',
+            '.ic-app-course-menu .menu-item-title'
+        ];
+
+        for (const selector of selectors) {
+            const el = document.querySelector(selector);
+            const text = el && el.textContent ? el.textContent.trim() : '';
+            if (text && text.length > 2) {
+                return sanitizeName(text);
+            }
+        }
+
+        // Fallback: derive from browser title (e.g., "Course Name: Modules").
+        const rawTitle = (document.title || '').split(':')[0].trim();
+        return sanitizeName(rawTitle || 'Canvas_Course');
+    };
+
     const getModuleItems = () => {
         return Array.from(document.querySelectorAll('a.ig-title'))
             .filter(a => a.href.includes('/modules/items/'));
@@ -258,7 +279,8 @@
         const a = document.createElement('a');
         const objectUrl = URL.createObjectURL(content);
         a.href = objectUrl;
-        a.download = "Canvas_File_Scraper_Export.zip";
+        const zipName = `${getCourseTitle()}.zip`;
+        a.download = zipName;
         a.click();
         URL.revokeObjectURL(objectUrl);
         dlBtn.disabled = false;
