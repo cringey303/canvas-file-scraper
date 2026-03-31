@@ -5,6 +5,7 @@
 // @description  Deep scrape and ZIP files from any Canvas Modules page
 // @author       Lucas Root
 // @match        https://*.instructure.com/courses/*/modules*
+// @match        *://*/courses/*/modules*
 // @grant        none
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
 // ==/UserScript==
@@ -54,11 +55,10 @@
         return candidate;
     };
 
-    // Find all module items that link to a page (which might contain a file)
-    const moduleItems = Array.from(document.querySelectorAll('a.ig-title'))
-        .filter(a => a.href.includes('/modules/items/'));
-
-    if (moduleItems.length === 0) return;
+    const getModuleItems = () => {
+        return Array.from(document.querySelectorAll('a.ig-title'))
+            .filter(a => a.href.includes('/modules/items/'));
+    };
 
     // --- UI Construction ---
     const container = document.createElement('div');
@@ -141,6 +141,17 @@
     // --- Scraper Logic ---
     startBtn.onclick = async () => {
         startBtn.style.display = 'none';
+        list.innerHTML = '';
+        selectActions.style.display = 'none';
+
+        const moduleItems = getModuleItems();
+        if (moduleItems.length === 0) {
+            status.innerText = 'No module item links found yet. Scroll/load modules, then try again.';
+            startBtn.style.display = 'block';
+            startBtn.innerText = 'Scan Again';
+            return;
+        }
+
         const found = [];
         for (let i = 0; i < moduleItems.length; i++) {
             status.innerText = `Scanning item ${i+1}/${moduleItems.length}...`;
