@@ -2,6 +2,8 @@
 
 Tampermonkey userscript for Canvas LMS that scans a course Modules page, finds linked downloadable files, and exports selected files into a single ZIP.
 
+<img width="316" height="312" alt="CanvasFileScraper" src="https://github.com/user-attachments/assets/c79082cf-f7e7-4e04-be82-f8f83afe2e90" />
+
 ## What it does
 
 - Adds a floating UI on Canvas Modules pages.
@@ -18,9 +20,7 @@ Tampermonkey userscript for Canvas LMS that scans a course Modules page, finds l
 
 ## Install with Tampermonkey
 
-1. Install [Tampermonkey](https://www.tampermonkey.net/):
-   - Chrome/Edge: install from the browser extension store.
-   - Firefox: install from Firefox Add-ons.
+1. Install [Tampermonkey](https://www.tampermonkey.net/) extension.
 2. Open this raw script URL in your browser:
   - [https://raw.githubusercontent.com/cringey303/canvas-file-scraper/main/scraper.user.js](https://raw.githubusercontent.com/cringey303/canvas-file-scraper/main/scraper.user.js)
 3. Tampermonkey should open an install prompt.
