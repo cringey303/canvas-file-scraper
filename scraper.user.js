@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Canvas Universal Deep Scraper
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @description  Deep scrape and ZIP files from any Canvas Modules page
 // @author       Lucas Root
 // @match        https://*.instructure.com/courses/*/modules*
@@ -63,12 +63,24 @@
     };
 
     // --- UI Construction ---
+    const launcherTab = document.createElement('button');
+    launcherTab.id = 'canvas-scraper-tab';
+    launcherTab.type = 'button';
+    launcherTab.textContent = '-';
+    launcherTab.title = 'Open Canvas Deep Scraper';
+    launcherTab.style = `
+        position: fixed; top: 140px; right: 0; width: 34px; height: 88px;
+        background: #2d2d2d; color: #fff; z-index: 99999; border: 1px solid #444;
+        border-right: none; border-radius: 8px 0 0 8px; cursor: pointer;
+        font-size: 24px; line-height: 1; font-weight: bold; box-shadow: 0 8px 20px rgba(0,0,0,0.5);
+    `;
+
     const container = document.createElement('div');
     container.id = "canvas-scraper-root";
     container.style = `
         position: fixed; top: 50px; right: 50px; width: 350px; height: 500px;
         background: #1d1d1d; color: #fff; z-index: 99999; padding: 0;
-        border-radius: 8px; display: flex; flex-direction: column;
+        border-radius: 8px; display: none; flex-direction: column;
         box-shadow: 0 10px 30px rgba(0,0,0,0.7); font-family: sans-serif;
         border: 1px solid #444; resize: both; overflow: hidden; min-width: 250px; min-height: 300px;
     `;
@@ -76,7 +88,10 @@
     container.innerHTML = `
         <div id="scraper-header" style="padding: 15px; background: #2d2d2d; cursor: move; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #444;">
             <span style="font-weight: bold; font-size: 14px;">Canvas Deep Scraper</span>
-            <button id="close-scraper" style="background: none; border: none; color: #ff4d4d; font-size: 20px; cursor: pointer;">&times;</button>
+            <div style="display: flex; gap: 6px; align-items: center;">
+                <button id="minimize-scraper" title="Minimize" style="background: none; border: none; color: #d1d5db; font-size: 22px; cursor: pointer; line-height: 1;">-</button>
+                <button id="close-scraper" title="Close" style="background: none; border: none; color: #ff4d4d; font-size: 20px; cursor: pointer; line-height: 1;">&times;</button>
+            </div>
         </div>
         <div style="flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column;">
             <p id="scrape-status" style="font-size: 11px; color: #aaa; margin-bottom: 10px;">Ready to scan...</p>
@@ -91,6 +106,7 @@
         <div style="height: 15px; width: 15px; position: absolute; bottom: 0; right: 0; cursor: nwse-resize;"></div>
     `;
 
+    document.body.appendChild(launcherTab);
     document.body.appendChild(container);
 
     const status = container.querySelector('#scrape-status');
@@ -100,6 +116,18 @@
     const selectActions = container.querySelector('#scrape-select-actions');
     const selectAllBtn = container.querySelector('#scrape-select-all');
     const selectNoneBtn = container.querySelector('#scrape-select-none');
+    const minimizeBtn = container.querySelector('#minimize-scraper');
+    const closeBtn = container.querySelector('#close-scraper');
+
+    const openPanel = () => {
+        container.style.display = 'flex';
+        launcherTab.style.display = 'none';
+    };
+
+    const minimizePanel = () => {
+        container.style.display = 'none';
+        launcherTab.style.display = 'block';
+    };
 
     const setAllCheckboxes = (checked) => {
         const checkboxes = container.querySelectorAll('.sc-cb');
@@ -108,8 +136,13 @@
         });
     };
 
+    launcherTab.addEventListener('click', openPanel);
     selectAllBtn.addEventListener('click', () => setAllCheckboxes(true));
     selectNoneBtn.addEventListener('click', () => setAllCheckboxes(false));
+    minimizeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        minimizePanel();
+    });
 
     // --- Draggable Logic ---
     let isDragging = false;
@@ -134,9 +167,11 @@
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
 
-    container.querySelector('#close-scraper').addEventListener('click', () => {
+    closeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
         document.removeEventListener('mousemove', onMouseMove);
         document.removeEventListener('mouseup', onMouseUp);
+        launcherTab.remove();
         container.remove();
     });
 
