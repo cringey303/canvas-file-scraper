@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         Canvas File Scraper
 // @namespace    http://tampermonkey.net/
-// @version      1.2
-// @description  Deep scrape and ZIP files from any Canvas Modules page
+// @version      1.3
+// @description  Scrape and ZIP Canvas files from course pages
 // @author       Lucas Root
-// @match        https://*.instructure.com/courses/*/modules*
-// @match        *://*/courses/*/modules*
+// @match        https://*.instructure.com/courses/*
+// @match        *://*/courses/*
 // @downloadURL  https://raw.githubusercontent.com/cringey303/canvas-file-scraper/main/scraper.user.js
 // @updateURL    https://raw.githubusercontent.com/cringey303/canvas-file-scraper/main/scraper.user.js
 // @grant        none
@@ -59,10 +59,9 @@
 
     const getCourseTitle = () => {
         const selectors = [
-            'h1',
-            '.ellipsible',
-            '[data-testid="title"]',
-            '.ic-app-course-menu .menu-item-title'
+            '.ic-app-course-menu .menu-item-title',
+            '#breadcrumbs .ellipsible a',
+            '[data-testid="course-name"]'
         ];
 
         for (const selector of selectors) {
@@ -108,7 +107,7 @@
         if (blobPromiseCache.has(url)) return blobPromiseCache.get(url);
 
         const promise = (async () => {
-            const res = await fetch(url);
+            const res = await fetch(url, { credentials: 'include', redirect: 'follow' });
             if (!res.ok) throw new Error(`Failed to fetch file: ${res.status}`);
             return res.blob();
         })();
@@ -126,6 +125,7 @@
     const buildZipBlob = async (entries, shouldCancel) => {
         const zip = new JSZip();
         const usedNames = new Set();
+        let addedFileCount = 0;
 
         for (const entry of entries) {
             if (shouldCancel && shouldCancel()) {
@@ -141,10 +141,15 @@
                 const ext = extensionFromUrl(entry.url);
                 const fileName = ensureUniqueName(`${baseName}${ext}`, usedNames);
                 zip.file(fileName, blob);
+                addedFileCount += 1;
             } catch (e) {
                 if (shouldCancel && shouldCancel()) throw e;
                 console.error('File skip:', e);
             }
+        }
+
+        if (addedFileCount === 0) {
+            throw new Error('No files could be downloaded.');
         }
 
         return zip.generateAsync({type:'blob'});
@@ -157,6 +162,7 @@
         if (entries.length === 0) {
             preparedZipBlob = null;
             preparedSelectionSignature = '';
+            setZipPreparing(false);
             return;
         }
 
@@ -168,11 +174,14 @@
             if (token !== activePrepareToken) return;
             preparedZipBlob = blob;
             preparedSelectionSignature = signature;
+            setZipPreparing(false);
             status.innerText = `Ready. ${entries.length} file${entries.length === 1 ? '' : 's'} prepared.`;
         } catch (e) {
             if (token !== activePrepareToken) return;
             preparedZipBlob = null;
             preparedSelectionSignature = '';
+            setZipPreparing(false);
+            status.innerText = 'ZIP preparation failed. Try again.';
             console.error('Background ZIP prepare failed:', e);
         }
     };
@@ -181,6 +190,7 @@
         if (prepareTimer) clearTimeout(prepareTimer);
         preparedZipBlob = null;
         preparedSelectionSignature = '';
+        setZipPreparing(true);
         prepareTimer = setTimeout(() => {
             prepareZipInBackground();
         }, 250);
@@ -189,6 +199,10 @@
     const getModuleItems = () => {
         return Array.from(document.querySelectorAll('a.ig-title'))
             .filter(a => a.href.includes('/modules/items/'));
+    };
+
+    const getPageFileLinks = () => {
+        return Array.from(document.querySelectorAll('a[href*="/files/"][href*="/download"]'));
     };
 
     // --- UI Construction ---
@@ -247,6 +261,12 @@
     const selectNoneBtn = container.querySelector('#scrape-select-none');
     const minimizeBtn = container.querySelector('#minimize-scraper');
     const closeBtn = container.querySelector('#close-scraper');
+
+    const setZipPreparing = (isPreparing) => {
+        dlBtn.disabled = isPreparing;
+        dlBtn.style.background = isPreparing ? '#6b7280' : '#00558c';
+        dlBtn.innerText = isPreparing ? 'Preparing ZIP...' : 'Download ZIP';
+    };
 
     const openPanel = () => {
         container.style.display = 'flex';
@@ -330,7 +350,8 @@
         if (prepareTimer) clearTimeout(prepareTimer);
 
         const moduleItems = getModuleItems();
-        if (moduleItems.length === 0) {
+        const pageFileLinks = getPageFileLinks();
+        if (moduleItems.length === 0 && pageFileLinks.length === 0) {
             isScanning = false;
             if (isAutoScan && autoScanAttempts < MAX_AUTO_SCAN_ATTEMPTS) {
                 autoScanAttempts += 1;
@@ -341,7 +362,7 @@
                 return;
             }
 
-            status.innerText = 'No module item links found yet. Scroll/load modules, then try again.';
+            status.innerText = 'No downloadable Canvas file links found. Try again after the page loads.';
             startBtn.style.display = 'block';
             startBtn.disabled = false;
             startBtn.innerText = 'Scan Again';
@@ -351,6 +372,38 @@
         autoScanAttempts = 0;
 
         const found = [];
+        const seenUrls = new Set();
+        const addFileRow = (name, url) => {
+            const div = document.createElement('div');
+            div.style = "font-size: 12px; padding: 5px; border-bottom: 1px solid #222; display: flex; align-items: center;";
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.className = 'sc-cb';
+            checkbox.dataset.name = name;
+            checkbox.value = url;
+            checkbox.checked = true;
+
+            const label = document.createElement('span');
+            label.style = 'margin-left:8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;';
+            label.textContent = name;
+
+            div.appendChild(checkbox);
+            div.appendChild(label);
+            list.appendChild(div);
+        };
+        const addFoundFile = (name, url) => {
+            if (seenUrls.has(url)) return;
+            const safeName = sanitizeName(name);
+            seenUrls.add(url);
+            found.push({ name: safeName, url });
+            addFileRow(safeName, url);
+        };
+
+        for (const link of pageFileLinks) {
+            addFoundFile(link.innerText.trim() || link.textContent.trim() || 'file', link.href);
+        }
+
         for (let i = 0; i < moduleItems.length; i++) {
             status.innerText = `Scanning item ${i+1}/${moduleItems.length}...`;
             try {
@@ -362,24 +415,7 @@
                 if (dl) {
                     const name = sanitizeName(moduleItems[i].innerText.trim());
                     const url = new URL(dl.getAttribute('href'), moduleItems[i].href).href;
-                    found.push({ name, url });
-                    const div = document.createElement('div');
-                    div.style = "font-size: 12px; padding: 5px; border-bottom: 1px solid #222; display: flex; align-items: center;";
-
-                    const checkbox = document.createElement('input');
-                    checkbox.type = 'checkbox';
-                    checkbox.className = 'sc-cb';
-                    checkbox.dataset.name = name;
-                    checkbox.value = url;
-                    checkbox.checked = true;
-
-                    const label = document.createElement('span');
-                    label.style = 'margin-left:8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;';
-                    label.textContent = name;
-
-                    div.appendChild(checkbox);
-                    div.appendChild(label);
-                    list.appendChild(div);
+                    addFoundFile(name, url);
                 }
             } catch (e) { console.error("Item skip:", e); }
         }
@@ -451,13 +487,14 @@
                 status.innerText = 'Download canceled.';
             } else {
                 console.error('Download failed:', e);
-                status.innerText = 'Download failed. Try again.';
+                status.innerText = e.message.startsWith('No files could be downloaded.')
+                    ? e.message
+                    : 'Download failed. Try again.';
             }
         } finally {
             isDownloadInProgress = false;
             cancelDownloadRequested = false;
-            dlBtn.disabled = false;
-            dlBtn.innerText = "Download ZIP";
+            setZipPreparing(false);
         }
     };
 })();
