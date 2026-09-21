@@ -28,6 +28,16 @@ Tampermonkey userscript for Canvas LMS that scans Canvas course pages, finds lin
 4. Click `Install` (or `Reinstall` when updating).
 5. Confirm the script is enabled in the Tampermonkey dashboard.
 
+### Cross-origin permission prompt
+
+When the scraper downloads a Canvas file, Tampermonkey may ask to allow access to a CDN domain such as `cdn.inst-fs-iad-prod.inscloudgate.net`.
+
+- Choose `Always allow domain` for the destination domain shown in the prompt.
+- Choose `Allow once` only if you want to approve it again later.
+- Do not choose `Always allow all domains`; the scraper only needs the specific file CDN domain.
+
+If Canvas uses a different CDN domain for another file, repeat `Always allow domain` for that domain.
+
 ### Manual fallback (if raw link does not prompt install)
 
 1. Open Tampermonkey dashboard.
