@@ -52,6 +52,7 @@ Tampermonkey userscript for Canvas LMS that scans Canvas course pages, finds lin
 - The script runs on Canvas course pages (`/courses/*`).
 - It finds links that look like Canvas file downloads (`/files/.../download`).
 - On a Modules page it also opens module item pages to find their file links.
+- File downloads use Tampermonkey's authenticated request API so Canvas redirects and file-host URLs can be downloaded with your active session.
 - If an item is not accessible with your account permissions, it may be skipped.
 - If no files are found, the panel shows `Scan Again`.
 - Tampermonkey auto-update checks use the script metadata URL and `@version`; bump `@version` before each release.

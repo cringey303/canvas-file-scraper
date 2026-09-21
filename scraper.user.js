@@ -1,14 +1,15 @@
 // ==UserScript==
 // @name         Canvas File Scraper
 // @namespace    http://tampermonkey.net/
-// @version      1.3
+// @version      1.4
 // @description  Scrape and ZIP Canvas files from course pages
 // @author       Lucas Root
 // @match        https://*.instructure.com/courses/*
 // @match        *://*/courses/*
 // @downloadURL  https://raw.githubusercontent.com/cringey303/canvas-file-scraper/main/scraper.user.js
 // @updateURL    https://raw.githubusercontent.com/cringey303/canvas-file-scraper/main/scraper.user.js
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      *
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
 // ==/UserScript==
 
@@ -103,10 +104,31 @@
         return entries.map((entry) => `${entry.name}|${entry.url}`).join('\n');
     };
 
+    const requestBlob = (url) => new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url,
+            responseType: 'blob',
+            onload: (response) => {
+                if (response.status < 200 || response.status >= 300) {
+                    reject(new Error(`HTTP ${response.status}`));
+                    return;
+                }
+                resolve(response.response);
+            },
+            onerror: () => reject(new Error('Canvas request was blocked or failed.')),
+            ontimeout: () => reject(new Error('Canvas request timed out.'))
+        });
+    });
+
     const getBlobForUrl = async (url) => {
         if (blobPromiseCache.has(url)) return blobPromiseCache.get(url);
 
         const promise = (async () => {
+            if (typeof GM_xmlhttpRequest === 'function') {
+                return requestBlob(url);
+            }
+
             const res = await fetch(url, { credentials: 'include', redirect: 'follow' });
             if (!res.ok) throw new Error(`Failed to fetch file: ${res.status}`);
             return res.blob();
@@ -125,6 +147,7 @@
     const buildZipBlob = async (entries, shouldCancel) => {
         const zip = new JSZip();
         const usedNames = new Set();
+        const skippedErrors = [];
         let addedFileCount = 0;
 
         for (const entry of entries) {
@@ -144,12 +167,14 @@
                 addedFileCount += 1;
             } catch (e) {
                 if (shouldCancel && shouldCancel()) throw e;
+                skippedErrors.push(`${entry.name}: ${e.message}`);
                 console.error('File skip:', e);
             }
         }
 
         if (addedFileCount === 0) {
-            throw new Error('No files could be downloaded.');
+            const reason = skippedErrors.length > 0 ? ` ${skippedErrors[0]}` : '';
+            throw new Error(`No files could be downloaded.${reason}`);
         }
 
         return zip.generateAsync({type:'blob'});
@@ -181,7 +206,9 @@
             preparedZipBlob = null;
             preparedSelectionSignature = '';
             setZipPreparing(false);
-            status.innerText = 'ZIP preparation failed. Try again.';
+            status.innerText = e.message.startsWith('No files could be downloaded.')
+                ? e.message
+                : 'ZIP preparation failed. Try again.';
             console.error('Background ZIP prepare failed:', e);
         }
     };
@@ -407,7 +434,7 @@
         for (let i = 0; i < moduleItems.length; i++) {
             status.innerText = `Scanning item ${i+1}/${moduleItems.length}...`;
             try {
-                const res = await fetch(moduleItems[i].href);
+                const res = await fetch(moduleItems[i].href, { credentials: 'include' });
                 if (!res.ok) continue;
                 const text = await res.text();
                 const doc = new DOMParser().parseFromString(text, 'text/html');
