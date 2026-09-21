@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Canvas File Scraper
 // @namespace    http://tampermonkey.net/
-// @version      1.5
+// @version      1.6
 // @description  Scrape and ZIP Canvas files from course pages
 // @author       Lucas Root
 // @match        https://*.instructure.com/courses/*
@@ -90,6 +90,23 @@
     let isScanning = false;
     const MAX_AUTO_SCAN_ATTEMPTS = 8;
     const AUTO_SCAN_RETRY_MS = 1500;
+    const MODULE_SCAN_CONCURRENCY = 6;
+    const FILE_DOWNLOAD_CONCURRENCY = 4;
+    const REQUEST_TIMEOUT_MS = 30000;
+
+    const mapWithConcurrency = async (items, concurrency, worker) => {
+        const results = new Array(items.length);
+        let nextIndex = 0;
+        const workerCount = Math.min(concurrency, items.length);
+        const workers = Array.from({ length: workerCount }, async () => {
+            while (nextIndex < items.length) {
+                const index = nextIndex++;
+                results[index] = await worker(items[index], index);
+            }
+        });
+        await Promise.all(workers);
+        return results;
+    };
 
     const getSelectedEntries = () => {
         return Array.from(container.querySelectorAll('.sc-cb:checked')).map((cb) => {
@@ -105,19 +122,31 @@
     };
 
     const requestBlob = (url) => new Promise((resolve, reject) => {
-        GM_xmlhttpRequest({
+        let request;
+        const timeout = setTimeout(() => {
+            if (request) request.abort();
+            reject(new Error('Canvas request timed out.'));
+        }, REQUEST_TIMEOUT_MS);
+        request = GM_xmlhttpRequest({
             method: 'GET',
             url,
             responseType: 'blob',
             onload: (response) => {
+                clearTimeout(timeout);
                 if (response.status < 200 || response.status >= 300) {
                     reject(new Error(`HTTP ${response.status}`));
                     return;
                 }
                 resolve(response.response);
             },
-            onerror: () => reject(new Error('Canvas request was blocked or failed.')),
-            ontimeout: () => reject(new Error('Canvas request timed out.'))
+            onerror: () => {
+                clearTimeout(timeout);
+                reject(new Error('Canvas request was blocked or failed.'));
+            },
+            ontimeout: () => {
+                clearTimeout(timeout);
+                reject(new Error('Canvas request timed out.'));
+            }
         });
     });
 
@@ -129,7 +158,21 @@
                 return requestBlob(url);
             }
 
-            const res = await fetch(url, { credentials: 'include', redirect: 'follow' });
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+            let res;
+            try {
+                res = await fetch(url, {
+                    credentials: 'include',
+                    redirect: 'follow',
+                    signal: controller.signal
+                });
+            } catch (e) {
+                if (e.name === 'AbortError') throw new Error('Canvas request timed out.');
+                throw e;
+            } finally {
+                clearTimeout(timeout);
+            }
             if (!res.ok) throw new Error(`Failed to fetch file: ${res.status}`);
             return res.blob();
         })();
@@ -153,32 +196,37 @@
         URL.revokeObjectURL(objectUrl);
     };
 
-    const buildZipBlob = async (entries, shouldCancel) => {
+    const buildZipBlob = async (entries, shouldCancel, onProgress) => {
         const zip = new JSZip();
         const usedNames = new Set();
         const skippedErrors = [];
         let addedFileCount = 0;
 
-        for (const entry of entries) {
+        const results = await mapWithConcurrency(entries, FILE_DOWNLOAD_CONCURRENCY, async (entry, index) => {
+            if (shouldCancel && shouldCancel()) throw new Error('ZIP build canceled by user.');
+            try {
+                return { entry, blob: await getBlobForUrl(entry.url) };
+            } catch (error) {
+                return { entry, error };
+            } finally {
+                if (onProgress) onProgress(index + 1, entries.length);
+            }
+        });
+
+        for (const result of results) {
             if (shouldCancel && shouldCancel()) {
                 throw new Error('ZIP build canceled by user.');
             }
-
-            try {
-                const blob = await getBlobForUrl(entry.url);
-                if (shouldCancel && shouldCancel()) {
-                    throw new Error('ZIP build canceled by user.');
-                }
-                const baseName = sanitizeName(entry.name);
-                const ext = extensionFromUrl(entry.url);
-                const fileName = ensureUniqueName(`${baseName}${ext}`, usedNames);
-                zip.file(fileName, blob);
-                addedFileCount += 1;
-            } catch (e) {
-                if (shouldCancel && shouldCancel()) throw e;
-                skippedErrors.push(`${entry.name}: ${e.message}`);
-                console.error('File skip:', e);
+            if (result.error) {
+                skippedErrors.push(`${result.entry.name}: ${result.error.message}`);
+                console.error('File skip:', result.error);
+                continue;
             }
+            const baseName = sanitizeName(result.entry.name);
+            const ext = extensionFromUrl(result.entry.url);
+            const fileName = ensureUniqueName(`${baseName}${ext}`, usedNames);
+            zip.file(fileName, result.blob);
+            addedFileCount += 1;
         }
 
         if (addedFileCount === 0) {
@@ -186,7 +234,7 @@
             throw new Error(`No files could be downloaded.${reason}`);
         }
 
-        return zip.generateAsync({type:'blob'});
+        return zip.generateAsync({ type: 'blob', compression: 'STORE', streamFiles: true });
     };
 
     const prepareZipInBackground = async () => {
@@ -202,9 +250,13 @@
 
         if (preparedZipBlob && preparedSelectionSignature === signature) return;
 
-        const token = ++activePrepareToken;
+        const token = activePrepareToken;
         try {
-            const blob = await buildZipBlob(entries);
+            const blob = await buildZipBlob(entries, null, (completed, total) => {
+                if (token === activePrepareToken) {
+                    status.innerText = `Preparing ZIP... ${completed}/${total} files`;
+                }
+            });
             if (token !== activePrepareToken) return;
             preparedZipBlob = blob;
             preparedSelectionSignature = signature;
@@ -224,6 +276,7 @@
 
     const queueZipPreparation = () => {
         if (prepareTimer) clearTimeout(prepareTimer);
+        activePrepareToken += 1;
         preparedZipBlob = null;
         preparedSelectionSignature = '';
         setZipPreparing(true);
@@ -358,6 +411,7 @@
         document.removeEventListener('mousemove', onMouseMove);
         document.removeEventListener('mouseup', onMouseUp);
         if (prepareTimer) clearTimeout(prepareTimer);
+        activePrepareToken += 1;
         if (autoScanTimer) clearTimeout(autoScanTimer);
         launcherTab.remove();
         container.remove();
@@ -462,21 +516,38 @@
             addFoundFile(link.innerText.trim() || link.textContent.trim() || 'file', link.href);
         }
 
-        for (let i = 0; i < moduleItems.length; i++) {
-            status.innerText = `Scanning item ${i+1}/${moduleItems.length}...`;
+        let scannedItems = 0;
+        const moduleResults = await mapWithConcurrency(moduleItems, MODULE_SCAN_CONCURRENCY, async (item) => {
             try {
-                const res = await fetch(moduleItems[i].href, { credentials: 'include' });
-                if (!res.ok) continue;
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+                let res;
+                try {
+                    res = await fetch(item.href, { credentials: 'include', signal: controller.signal });
+                } finally {
+                    clearTimeout(timeout);
+                }
+                if (!res.ok) return null;
                 const text = await res.text();
                 const doc = new DOMParser().parseFromString(text, 'text/html');
                 const dl = doc.querySelector('a[href*="/files/"][href*="/download"]');
-                if (dl) {
-                    const name = sanitizeName(moduleItems[i].innerText.trim());
-                    const url = new URL(dl.getAttribute('href'), moduleItems[i].href).href;
-                    addFoundFile(name, url);
-                }
-            } catch (e) { console.error("Item skip:", e); }
-        }
+                if (!dl) return null;
+                return {
+                    name: sanitizeName(item.innerText.trim()),
+                    url: new URL(dl.getAttribute('href'), item.href).href
+                };
+            } catch (e) {
+                console.error('Item skip:', e);
+                return null;
+            } finally {
+                scannedItems += 1;
+                status.innerText = `Scanning item ${scannedItems}/${moduleItems.length}...`;
+            }
+        });
+
+        moduleResults.forEach((result) => {
+            if (result) addFoundFile(result.name, result.url);
+        });
 
         isScanning = false;
         status.innerText = `Scan complete. Found ${found.length} files.`;
@@ -523,7 +594,13 @@
 
         try {
             if (!content || preparedSelectionSignature !== signature) {
-                content = await buildZipBlob(selectedEntries, () => cancelDownloadRequested);
+                content = await buildZipBlob(
+                    selectedEntries,
+                    () => cancelDownloadRequested,
+                    (completed, total) => {
+                        dlBtn.innerText = `Preparing ZIP... ${completed}/${total}`;
+                    }
+                );
                 preparedZipBlob = content;
                 preparedSelectionSignature = signature;
             }
