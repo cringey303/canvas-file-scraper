@@ -9,6 +9,7 @@ Tampermonkey userscript for Canvas LMS that scans Canvas course pages, finds lin
 - Adds a floating UI on Canvas course pages.
 - Scans the current page for Canvas file download links and scans module item pages when used on Modules.
 - Lets you choose which discovered files to include.
+- Provides a download button for each individual file.
 - Includes `Select All` and `Select None` quick actions.
 - Downloads all selected files as `<course name>.zip`.
 

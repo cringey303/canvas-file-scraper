@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Canvas File Scraper
 // @namespace    http://tampermonkey.net/
-// @version      1.4
+// @version      1.5
 // @description  Scrape and ZIP Canvas files from course pages
 // @author       Lucas Root
 // @match        https://*.instructure.com/courses/*
@@ -142,6 +142,15 @@
             blobPromiseCache.delete(url);
             throw e;
         }
+    };
+
+    const downloadBlob = (blob, fileName) => {
+        const link = document.createElement('a');
+        const objectUrl = URL.createObjectURL(blob);
+        link.href = objectUrl;
+        link.download = fileName;
+        link.click();
+        URL.revokeObjectURL(objectUrl);
     };
 
     const buildZipBlob = async (entries, shouldCancel) => {
@@ -402,7 +411,7 @@
         const seenUrls = new Set();
         const addFileRow = (name, url) => {
             const div = document.createElement('div');
-            div.style = "font-size: 12px; padding: 5px; border-bottom: 1px solid #222; display: flex; align-items: center;";
+            div.style = "font-size: 12px; padding: 5px; border-bottom: 1px solid #222; display: flex; align-items: center; gap: 6px;";
 
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
@@ -412,11 +421,33 @@
             checkbox.checked = true;
 
             const label = document.createElement('span');
-            label.style = 'margin-left:8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;';
+            label.style = 'margin-left:2px; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;';
             label.textContent = name;
+
+            const singleDownloadBtn = document.createElement('button');
+            singleDownloadBtn.type = 'button';
+            singleDownloadBtn.textContent = 'Download';
+            singleDownloadBtn.title = `Download ${name}`;
+            singleDownloadBtn.style = 'flex: 0 0 auto; padding: 3px 6px; background: #00558c; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 10px;';
+            singleDownloadBtn.addEventListener('click', async () => {
+                singleDownloadBtn.disabled = true;
+                singleDownloadBtn.textContent = '...';
+                try {
+                    const blob = await getBlobForUrl(url);
+                    const extension = extensionFromUrl(url);
+                    downloadBlob(blob, `${name}${extension}`);
+                } catch (e) {
+                    console.error('Single file download failed:', e);
+                    status.innerText = `Download failed: ${e.message}`;
+                } finally {
+                    singleDownloadBtn.disabled = false;
+                    singleDownloadBtn.textContent = 'Download';
+                }
+            });
 
             div.appendChild(checkbox);
             div.appendChild(label);
+            div.appendChild(singleDownloadBtn);
             list.appendChild(div);
         };
         const addFoundFile = (name, url) => {
