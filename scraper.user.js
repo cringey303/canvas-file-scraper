@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Canvas File Scraper
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      1.7
 // @description  Scrape and ZIP Canvas files from course pages
 // @author       Lucas Root
 // @match        https://*.instructure.com/courses/*
@@ -234,7 +234,12 @@
             throw new Error(`No files could be downloaded.${reason}`);
         }
 
-        return zip.generateAsync({ type: 'blob', compression: 'STORE', streamFiles: true });
+        if (onProgress) onProgress(entries.length, entries.length, true);
+        const generation = zip.generateAsync({ type: 'blob', compression: 'STORE' });
+        const timeout = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('ZIP creation timed out.')), REQUEST_TIMEOUT_MS);
+        });
+        return Promise.race([generation, timeout]);
     };
 
     const prepareZipInBackground = async () => {
@@ -252,9 +257,11 @@
 
         const token = activePrepareToken;
         try {
-            const blob = await buildZipBlob(entries, null, (completed, total) => {
+            const blob = await buildZipBlob(entries, null, (completed, total, creating) => {
                 if (token === activePrepareToken) {
-                    status.innerText = `Preparing ZIP... ${completed}/${total} files`;
+                    status.innerText = creating
+                        ? 'Creating ZIP...'
+                        : `Preparing ZIP... ${completed}/${total} files`;
                 }
             });
             if (token !== activePrepareToken) return;
