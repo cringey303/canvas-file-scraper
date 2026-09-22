@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Canvas File Scraper
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      1.9
 // @description  Scrape and ZIP Canvas files from course pages
 // @author       Lucas Root
 // @match        https://*.instructure.com/courses/*
@@ -226,7 +226,8 @@
             const baseName = sanitizeName(result.entry.name);
             const ext = extensionFromUrl(result.entry.url);
             const fileName = ensureUniqueName(`${baseName}${ext}`, usedNames);
-            zip.file(fileName, result.blob);
+            const data = await result.blob.arrayBuffer();
+            zip.file(fileName, data);
             addedFileCount += 1;
         }
 
@@ -237,7 +238,7 @@
 
         if (onProgress) onProgress(entries.length, entries.length, true, 0);
         const generation = zip.generateAsync(
-            { type: 'blob', compression: 'STORE' },
+            { type: 'uint8array', compression: 'STORE' },
             (metadata) => {
                 if (onProgress) onProgress(entries.length, entries.length, true, metadata.percent);
             }
@@ -247,7 +248,8 @@
             timeoutId = setTimeout(() => reject(new Error('ZIP creation timed out after 120 seconds.')), ZIP_CREATION_TIMEOUT_MS);
         });
         try {
-            return await Promise.race([generation, timeout]);
+            const bytes = await Promise.race([generation, timeout]);
+            return new Blob([bytes], { type: 'application/zip' });
         } finally {
             clearTimeout(timeoutId);
         }
