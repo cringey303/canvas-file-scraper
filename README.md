@@ -79,6 +79,9 @@ If Canvas uses a different CDN domain for another file, repeat `Always allow dom
   - A 22-byte ZIP is an empty archive. This version refuses to download one and reports when no files could be fetched.
   - Check that files were found and selected, and that you have permission to open them.
   - Verify you have permission to open those module items/files.
+- ZIP preparation looks stuck:
+  - The percentage now advances as bytes are archived; large courses simply take longer.
+  - There is no fixed time limit on archive creation, so a big course is no longer cut off part way.
 - Download blocked by browser:
   - Allow downloads/popups for your Canvas domain if prompted.
 

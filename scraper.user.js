@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Canvas File Scraper
 // @namespace    http://tampermonkey.net/
-// @version      1.9
+// @version      2.0
 // @description  Scrape and ZIP Canvas files from course pages
 // @author       Lucas Root
 // @match        https://*.instructure.com/courses/*
@@ -10,7 +10,6 @@
 // @updateURL    https://raw.githubusercontent.com/cringey303/canvas-file-scraper/main/scraper.user.js
 // @grant        GM_xmlhttpRequest
 // @connect      *
-// @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
 // ==/UserScript==
 
 (function() {
@@ -93,7 +92,8 @@
     const MODULE_SCAN_CONCURRENCY = 6;
     const FILE_DOWNLOAD_CONCURRENCY = 4;
     const REQUEST_TIMEOUT_MS = 30000;
-    const ZIP_CREATION_TIMEOUT_MS = 120000;
+    const ZIP_READ_CHUNK_BYTES = 4 * 1024 * 1024;
+    const U32_MAX = 0xFFFFFFFF;
 
     const mapWithConcurrency = async (items, concurrency, worker) => {
         const results = new Array(items.length);
@@ -138,7 +138,8 @@
                     reject(new Error(`HTTP ${response.status}`));
                     return;
                 }
-                resolve(response.response);
+                const data = response.response;
+                resolve(data instanceof Blob ? data : new Blob([data]));
             },
             onerror: () => {
                 clearTimeout(timeout);
@@ -197,11 +198,206 @@
         URL.revokeObjectURL(objectUrl);
     };
 
+    // --- Minimal stored (uncompressed) ZIP writer ---
+    // This replaces JSZip, whose generateAsync scheduled its work on microtasks:
+    // the renderer never got a turn, so progress text stayed frozen at 0% and a
+    // large course blew past any wall-clock timeout. Writing the archive here
+    // lets us yield to the event loop, report real progress, and stay cancelable.
+    const CRC32_TABLE = (() => {
+        const table = new Uint32Array(256);
+        for (let i = 0; i < 256; i += 1) {
+            let value = i;
+            for (let bit = 0; bit < 8; bit += 1) {
+                value = (value & 1) ? (0xEDB88320 ^ (value >>> 1)) : (value >>> 1);
+            }
+            table[i] = value >>> 0;
+        }
+        return table;
+    })();
+
+    const crc32Chunk = (crc, bytes) => {
+        let value = crc;
+        for (let i = 0; i < bytes.length; i += 1) {
+            value = CRC32_TABLE[(value ^ bytes[i]) & 0xFF] ^ (value >>> 8);
+        }
+        return value >>> 0;
+    };
+
+    const createByteWriter = (size) => {
+        const bytes = new Uint8Array(size);
+        const view = new DataView(bytes.buffer);
+        let offset = 0;
+        return {
+            bytes,
+            u16(value) { view.setUint16(offset, value, true); offset += 2; },
+            u32(value) { view.setUint32(offset, value >>> 0, true); offset += 4; },
+            u64(value) {
+                view.setUint32(offset, value % 0x100000000, true);
+                view.setUint32(offset + 4, Math.floor(value / 0x100000000), true);
+                offset += 8;
+            },
+            raw(source) { bytes.set(source, offset); offset += source.length; }
+        };
+    };
+
+    const toDosDateTime = (date) => {
+        const year = Math.max(date.getFullYear(), 1980);
+        return {
+            time: ((date.getHours() & 0x1F) << 11)
+                | ((date.getMinutes() & 0x3F) << 5)
+                | ((date.getSeconds() >> 1) & 0x1F),
+            date: (((year - 1980) & 0x7F) << 9)
+                | (((date.getMonth() + 1) & 0x0F) << 5)
+                | (date.getDate() & 0x1F)
+        };
+    };
+
+    const buildLocalHeader = (nameBytes, crc, size, stamp) => {
+        const needsZip64 = size > U32_MAX;
+        const extraLength = needsZip64 ? 20 : 0;
+        const writer = createByteWriter(30 + nameBytes.length + extraLength);
+        writer.u32(0x04034b50);
+        writer.u16(needsZip64 ? 45 : 20);
+        writer.u16(0x0800); // UTF-8 file names
+        writer.u16(0); // stored, no compression
+        writer.u16(stamp.time);
+        writer.u16(stamp.date);
+        writer.u32(crc);
+        writer.u32(needsZip64 ? U32_MAX : size);
+        writer.u32(needsZip64 ? U32_MAX : size);
+        writer.u16(nameBytes.length);
+        writer.u16(extraLength);
+        writer.raw(nameBytes);
+        if (needsZip64) {
+            writer.u16(0x0001);
+            writer.u16(16);
+            writer.u64(size);
+            writer.u64(size);
+        }
+        return writer.bytes;
+    };
+
+    const buildCentralEntry = (entry, stamp) => {
+        const includeSizes = entry.size > U32_MAX;
+        const includeOffset = entry.offset > U32_MAX;
+        const payloadLength = (includeSizes ? 16 : 0) + (includeOffset ? 8 : 0);
+        const extraLength = payloadLength > 0 ? payloadLength + 4 : 0;
+        const writer = createByteWriter(46 + entry.nameBytes.length + extraLength);
+        writer.u32(0x02014b50);
+        writer.u16(extraLength > 0 ? 45 : 20); // version made by
+        writer.u16(includeSizes ? 45 : 20); // version needed
+        writer.u16(0x0800);
+        writer.u16(0);
+        writer.u16(stamp.time);
+        writer.u16(stamp.date);
+        writer.u32(entry.crc);
+        writer.u32(includeSizes ? U32_MAX : entry.size);
+        writer.u32(includeSizes ? U32_MAX : entry.size);
+        writer.u16(entry.nameBytes.length);
+        writer.u16(extraLength);
+        writer.u16(0); // comment length
+        writer.u16(0); // disk number
+        writer.u16(0); // internal attributes
+        writer.u32(0); // external attributes
+        writer.u32(includeOffset ? U32_MAX : entry.offset);
+        writer.raw(entry.nameBytes);
+        if (extraLength > 0) {
+            writer.u16(0x0001);
+            writer.u16(payloadLength);
+            if (includeSizes) {
+                writer.u64(entry.size);
+                writer.u64(entry.size);
+            }
+            if (includeOffset) writer.u64(entry.offset);
+        }
+        return writer.bytes;
+    };
+
+    const buildEndOfCentralDirectory = (count, centralSize, centralOffset) => {
+        const needsZip64 = count > 0xFFFF || centralSize > U32_MAX || centralOffset > U32_MAX;
+        const writer = createByteWriter(needsZip64 ? 98 : 22);
+        if (needsZip64) {
+            writer.u32(0x06064b50);
+            writer.u64(44); // size of this record minus 12
+            writer.u16(45);
+            writer.u16(45);
+            writer.u32(0);
+            writer.u32(0);
+            writer.u64(count);
+            writer.u64(count);
+            writer.u64(centralSize);
+            writer.u64(centralOffset);
+            writer.u32(0x07064b50);
+            writer.u32(0);
+            writer.u64(centralOffset + centralSize);
+            writer.u32(1);
+        }
+        writer.u32(0x06054b50);
+        writer.u16(0);
+        writer.u16(0);
+        writer.u16(needsZip64 ? 0xFFFF : count);
+        writer.u16(needsZip64 ? 0xFFFF : count);
+        writer.u32(needsZip64 ? U32_MAX : centralSize);
+        writer.u32(needsZip64 ? U32_MAX : centralOffset);
+        writer.u16(0); // no archive comment
+        return writer.bytes;
+    };
+
+    const yieldToRenderer = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    const writeStoredZip = async (files, shouldCancel, onBytes) => {
+        const encoder = new TextEncoder();
+        const stamp = toDosDateTime(new Date());
+        const parts = [];
+        const centralEntries = [];
+        let offset = 0;
+
+        for (const file of files) {
+            if (shouldCancel && shouldCancel()) throw new Error('ZIP build canceled by user.');
+
+            const nameBytes = encoder.encode(file.name);
+            const size = file.blob.size;
+
+            // CRC32 has to see every byte, so read the blob one slice at a time and
+            // hand the main thread back between slices instead of locking it up.
+            let crc = 0xFFFFFFFF;
+            for (let start = 0; start < size; start += ZIP_READ_CHUNK_BYTES) {
+                if (shouldCancel && shouldCancel()) throw new Error('ZIP build canceled by user.');
+                const end = Math.min(start + ZIP_READ_CHUNK_BYTES, size);
+                const slice = new Uint8Array(await file.blob.slice(start, end).arrayBuffer());
+                crc = crc32Chunk(crc, slice);
+                if (onBytes) onBytes(slice.length);
+                await yieldToRenderer();
+            }
+            crc = (crc ^ 0xFFFFFFFF) >>> 0;
+
+            const header = buildLocalHeader(nameBytes, crc, size, stamp);
+            parts.push(header);
+            // The blob is handed to the archive by reference; the browser keeps it
+            // backed by disk, so memory does not grow with the course size.
+            if (size > 0) parts.push(file.blob);
+            centralEntries.push({ nameBytes, crc, size, offset });
+            offset += header.length + size;
+
+            if (size === 0 && onBytes) onBytes(0);
+        }
+
+        const centralOffset = offset;
+        let centralSize = 0;
+        for (const entry of centralEntries) {
+            const bytes = buildCentralEntry(entry, stamp);
+            parts.push(bytes);
+            centralSize += bytes.length;
+        }
+        parts.push(buildEndOfCentralDirectory(centralEntries.length, centralSize, centralOffset));
+
+        return new Blob(parts, { type: 'application/zip' });
+    };
+
     const buildZipBlob = async (entries, shouldCancel, onProgress) => {
-        const zip = new JSZip();
         const usedNames = new Set();
         const skippedErrors = [];
-        let addedFileCount = 0;
+        const files = [];
 
         const results = await mapWithConcurrency(entries, FILE_DOWNLOAD_CONCURRENCY, async (entry, index) => {
             if (shouldCancel && shouldCancel()) throw new Error('ZIP build canceled by user.');
@@ -226,33 +422,27 @@
             const baseName = sanitizeName(result.entry.name);
             const ext = extensionFromUrl(result.entry.url);
             const fileName = ensureUniqueName(`${baseName}${ext}`, usedNames);
-            const data = await result.blob.arrayBuffer();
-            zip.file(fileName, data);
-            addedFileCount += 1;
+            files.push({ name: fileName, blob: result.blob });
         }
 
-        if (addedFileCount === 0) {
+        if (files.length === 0) {
             const reason = skippedErrors.length > 0 ? ` ${skippedErrors[0]}` : '';
             throw new Error(`No files could be downloaded.${reason}`);
         }
 
-        if (onProgress) onProgress(entries.length, entries.length, true, 0);
-        const generation = zip.generateAsync(
-            { type: 'uint8array', compression: 'STORE' },
-            (metadata) => {
-                if (onProgress) onProgress(entries.length, entries.length, true, metadata.percent);
-            }
-        );
-        let timeoutId;
-        const timeout = new Promise((_, reject) => {
-            timeoutId = setTimeout(() => reject(new Error('ZIP creation timed out after 120 seconds.')), ZIP_CREATION_TIMEOUT_MS);
+        const totalBytes = files.reduce((sum, file) => sum + file.blob.size, 0);
+        let processedBytes = 0;
+        const reportCreation = () => {
+            if (!onProgress) return;
+            const percent = totalBytes > 0 ? (processedBytes / totalBytes) * 100 : 100;
+            onProgress(entries.length, entries.length, true, percent);
+        };
+
+        reportCreation();
+        return writeStoredZip(files, shouldCancel, (byteCount) => {
+            processedBytes += byteCount;
+            reportCreation();
         });
-        try {
-            const bytes = await Promise.race([generation, timeout]);
-            return new Blob([bytes], { type: 'application/zip' });
-        } finally {
-            clearTimeout(timeoutId);
-        }
     };
 
     const prepareZipInBackground = async () => {
@@ -270,7 +460,7 @@
 
         const token = activePrepareToken;
         try {
-            const blob = await buildZipBlob(entries, null, (completed, total, creating, percent) => {
+            const blob = await buildZipBlob(entries, () => token !== activePrepareToken, (completed, total, creating, percent) => {
                 if (token === activePrepareToken) {
                     status.innerText = creating
                         ? `Creating ZIP... ${Math.round(percent || 0)}%`
@@ -604,6 +794,9 @@
 
         isDownloadInProgress = true;
         cancelDownloadRequested = false;
+        // Stop any in-flight background prepare so the two builds do not compete.
+        if (prepareTimer) clearTimeout(prepareTimer);
+        activePrepareToken += 1;
         dlBtn.disabled = false;
         dlBtn.innerText = "Cancel";
 
