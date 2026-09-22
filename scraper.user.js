@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Canvas File Scraper
 // @namespace    http://tampermonkey.net/
-// @version      1.7
+// @version      1.8
 // @description  Scrape and ZIP Canvas files from course pages
 // @author       Lucas Root
 // @match        https://*.instructure.com/courses/*
@@ -93,6 +93,7 @@
     const MODULE_SCAN_CONCURRENCY = 6;
     const FILE_DOWNLOAD_CONCURRENCY = 4;
     const REQUEST_TIMEOUT_MS = 30000;
+    const ZIP_CREATION_TIMEOUT_MS = 120000;
 
     const mapWithConcurrency = async (items, concurrency, worker) => {
         const results = new Array(items.length);
@@ -234,12 +235,22 @@
             throw new Error(`No files could be downloaded.${reason}`);
         }
 
-        if (onProgress) onProgress(entries.length, entries.length, true);
-        const generation = zip.generateAsync({ type: 'blob', compression: 'STORE' });
+        if (onProgress) onProgress(entries.length, entries.length, true, 0);
+        const generation = zip.generateAsync(
+            { type: 'blob', compression: 'STORE' },
+            (metadata) => {
+                if (onProgress) onProgress(entries.length, entries.length, true, metadata.percent);
+            }
+        );
+        let timeoutId;
         const timeout = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error('ZIP creation timed out.')), REQUEST_TIMEOUT_MS);
+            timeoutId = setTimeout(() => reject(new Error('ZIP creation timed out after 120 seconds.')), ZIP_CREATION_TIMEOUT_MS);
         });
-        return Promise.race([generation, timeout]);
+        try {
+            return await Promise.race([generation, timeout]);
+        } finally {
+            clearTimeout(timeoutId);
+        }
     };
 
     const prepareZipInBackground = async () => {
@@ -257,10 +268,10 @@
 
         const token = activePrepareToken;
         try {
-            const blob = await buildZipBlob(entries, null, (completed, total, creating) => {
+            const blob = await buildZipBlob(entries, null, (completed, total, creating, percent) => {
                 if (token === activePrepareToken) {
                     status.innerText = creating
-                        ? 'Creating ZIP...'
+                        ? `Creating ZIP... ${Math.round(percent || 0)}%`
                         : `Preparing ZIP... ${completed}/${total} files`;
                 }
             });
@@ -274,9 +285,7 @@
             preparedZipBlob = null;
             preparedSelectionSignature = '';
             setZipPreparing(false);
-            status.innerText = e.message.startsWith('No files could be downloaded.')
-                ? e.message
-                : 'ZIP preparation failed. Try again.';
+            status.innerText = e.message;
             console.error('Background ZIP prepare failed:', e);
         }
     };
@@ -604,8 +613,10 @@
                 content = await buildZipBlob(
                     selectedEntries,
                     () => cancelDownloadRequested,
-                    (completed, total) => {
-                        dlBtn.innerText = `Preparing ZIP... ${completed}/${total}`;
+                    (completed, total, creating, percent) => {
+                        dlBtn.innerText = creating
+                            ? `Creating ZIP... ${Math.round(percent || 0)}%`
+                            : `Preparing ZIP... ${completed}/${total}`;
                     }
                 );
                 preparedZipBlob = content;
@@ -629,9 +640,7 @@
                 status.innerText = 'Download canceled.';
             } else {
                 console.error('Download failed:', e);
-                status.innerText = e.message.startsWith('No files could be downloaded.')
-                    ? e.message
-                    : 'Download failed. Try again.';
+                status.innerText = e.message;
             }
         } finally {
             isDownloadInProgress = false;
