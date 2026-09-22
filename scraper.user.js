@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Canvas File Scraper
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.2
 // @description  Scrape and ZIP Canvas files from course pages
 // @author       Lucas Root
 // @match        https://*.instructure.com/courses/*
@@ -118,6 +118,7 @@
     const MAX_AUTO_SCAN_ATTEMPTS = 8;
     const AUTO_SCAN_RETRY_MS = 1500;
     const MODULE_SCAN_CONCURRENCY = 6;
+    const API_PAGE_LIMIT = 20;
     const FILE_DOWNLOAD_CONCURRENCY = 4;
     const REQUEST_TIMEOUT_MS = 30000;
     const ZIP_READ_CHUNK_BYTES = 4 * 1024 * 1024;
@@ -558,6 +559,66 @@
         }, 250);
     };
 
+    const getCourseId = () => {
+        const match = window.location.pathname.match(/\/courses\/(\d+)/);
+        return match ? match[1] : '';
+    };
+
+    const getModuleItemId = (link) => {
+        const match = (link.getAttribute('href') || '').match(/\/modules\/items\/(\d+)/);
+        return match ? match[1] : '';
+    };
+
+    // Canvas paginates through an RFC 5988 Link header.
+    const parseNextLink = (header) => {
+        if (!header) return '';
+        for (const part of header.split(',')) {
+            const match = part.match(/<([^>]+)>\s*;\s*rel="next"/);
+            if (match) return match[1];
+        }
+        return '';
+    };
+
+    // One request per 100 modules instead of one page fetch per module item.
+    // Modules holding more than ~100 items come back without their items, and
+    // those simply fall through to the per-item page scan below.
+    const fetchModuleItemsFromApi = async (courseId) => {
+        const itemsById = new Map();
+        if (!courseId) return itemsById;
+
+        let url = `${window.location.origin}/api/v1/courses/${courseId}/modules?include[]=items&per_page=100`;
+        for (let page = 0; page < API_PAGE_LIMIT && url; page += 1) {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+            let res;
+            try {
+                res = await fetch(url, {
+                    credentials: 'include',
+                    headers: { Accept: 'application/json' },
+                    signal: controller.signal
+                });
+            } finally {
+                clearTimeout(timeout);
+            }
+            if (!res.ok) throw new Error(`Canvas API responded ${res.status}`);
+
+            const modules = await res.json();
+            if (!Array.isArray(modules)) throw new Error('Unexpected Canvas API response.');
+            for (const module of modules) {
+                const items = (module && Array.isArray(module.items)) ? module.items : [];
+                for (const item of items) {
+                    if (item && item.id !== null && item.id !== undefined) {
+                        itemsById.set(String(item.id), item);
+                    }
+                }
+            }
+
+            url = parseNextLink(res.headers.get('Link'));
+        }
+
+        return itemsById;
+    };
+
     const getModuleItems = () => {
         return Array.from(document.querySelectorAll('a.ig-title'))
             .filter(a => a.href.includes('/modules/items/'));
@@ -735,7 +796,13 @@
         autoScanAttempts = 0;
 
         const found = [];
-        const seenUrls = new Set();
+        const seenKeys = new Set();
+        // /files/123/download and /courses/1/files/123/download?download_frd=1 are
+        // the same file, so key on the file id whenever the URL carries one.
+        const fileKey = (url) => {
+            const match = url.match(/\/files\/(\d+)/);
+            return match ? `file:${match[1]}` : `url:${url}`;
+        };
         const addFileRow = (name, url) => {
             const div = document.createElement('div');
             div.style = "font-size: 12px; padding: 5px; border-bottom: 1px solid #222; display: flex; align-items: center; gap: 6px;";
@@ -778,9 +845,10 @@
             list.appendChild(div);
         };
         const addFoundFile = (name, url) => {
-            if (seenUrls.has(url)) return;
+            const key = fileKey(url);
+            if (seenKeys.has(key)) return;
             const safeName = sanitizeName(name);
-            seenUrls.add(url);
+            seenKeys.add(key);
             found.push({ name: safeName, url });
             addFileRow(safeName, url);
         };
@@ -789,8 +857,40 @@
             addFoundFile(link.innerText.trim() || link.textContent.trim() || 'file', link.href);
         }
 
+        // Ask the API to classify the module items first. Anything it reports as a
+        // File resolves to a download URL with no request of its own; everything
+        // else (a Page or Assignment may still carry an attachment) is scanned as
+        // before. A failure here costs nothing but the old behaviour.
+        const courseId = getCourseId();
+        let apiItems = new Map();
+        try {
+            status.innerText = 'Looking up course modules...';
+            apiItems = await fetchModuleItemsFromApi(courseId);
+        } catch (e) {
+            console.error('Canvas API lookup failed; falling back to page scans:', e);
+        }
+
+        // Results keep their slot so the list still matches the order on the page.
+        const resolved = new Array(moduleItems.length).fill(null);
+        const itemsNeedingScan = [];
+        const scanSlots = [];
+        moduleItems.forEach((item, index) => {
+            const apiItem = apiItems.get(getModuleItemId(item));
+            const contentId = apiItem && apiItem.content_id;
+            if (apiItem && apiItem.type === 'File' && contentId !== null && contentId !== undefined) {
+                const title = (apiItem.title || item.innerText || '').trim();
+                resolved[index] = {
+                    name: sanitizeName(title),
+                    url: `${window.location.origin}/courses/${courseId}/files/${contentId}/download?download_frd=1`
+                };
+            } else {
+                itemsNeedingScan.push(item);
+                scanSlots.push(index);
+            }
+        });
+
         let scannedItems = 0;
-        const moduleResults = await mapWithConcurrency(moduleItems, MODULE_SCAN_CONCURRENCY, async (item) => {
+        const moduleResults = await mapWithConcurrency(itemsNeedingScan, MODULE_SCAN_CONCURRENCY, async (item) => {
             try {
                 const controller = new AbortController();
                 const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -814,11 +914,14 @@
                 return null;
             } finally {
                 scannedItems += 1;
-                status.innerText = `Scanning item ${scannedItems}/${moduleItems.length}...`;
+                status.innerText = `Scanning item ${scannedItems}/${itemsNeedingScan.length}...`;
             }
         });
 
-        moduleResults.forEach((result) => {
+        moduleResults.forEach((result, index) => {
+            if (result) resolved[scanSlots[index]] = result;
+        });
+        resolved.forEach((result) => {
             if (result) addFoundFile(result.name, result.url);
         });
 

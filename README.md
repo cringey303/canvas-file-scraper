@@ -8,6 +8,7 @@ Tampermonkey userscript for Canvas LMS that scans Canvas course pages, finds lin
 
 - Adds a floating UI on Canvas course pages.
 - Scans the current page for Canvas file download links and scans module item pages when used on Modules.
+- Uses the Canvas modules API to resolve file items without opening each one; items it does not cover, and courses where the API is unavailable, fall back to the per-item page scan.
 - Lets you choose which discovered files to include.
 - Provides a download button for each individual file.
 - Includes `Select All` and `Select None` quick actions.
@@ -79,6 +80,8 @@ If Canvas uses a different CDN domain for another file, repeat `Always allow dom
   - A 22-byte ZIP is an empty archive. This version refuses to download one and reports when no files could be fetched.
   - Check that files were found and selected, and that you have permission to open them.
   - Verify you have permission to open those module items/files.
+- Scan misses files, or is slower than expected:
+  - The API lookup is best-effort. If it fails, the console logs `Canvas API lookup failed; falling back to page scans` and every module item is opened individually, as before.
 - ZIP preparation looks stuck:
   - The percentage now advances as bytes are archived; large courses simply take longer.
   - There is no fixed time limit on archive creation, so a big course is no longer cut off part way.
